@@ -45,7 +45,7 @@ class VGG(nn.Module):
         # Output is already 2×2 — no need for adaptive pool
         self.classifier = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(1024, 512),
+            nn.Linear(12544, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(512, num_classes),
