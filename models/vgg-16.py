@@ -45,7 +45,7 @@ class VGG(nn.Module):
         # Output is already 2×2 — no need for adaptive pool
         self.classifier = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(12544, 512),
+            nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(512, num_classes),
@@ -53,6 +53,10 @@ class VGG(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = x.flatten(1)
+        x = torch.flatten(x, 1)
         x = self.classifier(x)
         return x
+
+if __name__=="__main__":
+    model = VGG()
+    model.forward(torch.randn(1,3,64,64))

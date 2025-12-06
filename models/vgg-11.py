@@ -5,7 +5,7 @@ import torch.nn.functional as F
 class VGG(nn.Module):
     def __init__(self,num_classes=200):
         super(VGG, self).__init__()
-        self.conv1 = nn.Conv2d(3,64,3,1) #224 x 224
+        self.conv1 = nn.Conv2d(3,64,3,1) #64 x 64
         self.conv2 = nn.Conv2d(64,128,3,1) #
         self.conv3 = nn.Conv2d(128,256,3,1) #
         self.conv4 = nn.Conv2d(256,256,3,1) #
