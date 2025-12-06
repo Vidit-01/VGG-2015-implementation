@@ -14,7 +14,7 @@ class VGG(nn.Module):
         self.conv7 = nn.Conv2d(512,512,3,1) #
         self.conv8 = nn.Conv2d(512,512,3,1) #
 
-        self.fc1 = nn.Linear(25088,4096)
+        self.fc1 = nn.Linear(512*6*6,4096)
         self.fc2 = nn.Linear(4096,4096)
         self.fc3 = nn.Linear(4096,200)
 
