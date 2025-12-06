@@ -6,13 +6,13 @@ from torch.utils.data import DataLoader
 
 train_transform = transforms.Compose([
     transforms.Resize(256),
-    transforms.RandomCrop(227),
+    transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize(256),
-    transforms.CenterCrop(227),
+    transforms.CenterCrop(224),
     transforms.ToTensor(),
 ])

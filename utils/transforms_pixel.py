@@ -3,7 +3,7 @@ import torch
 
 train_transform = T.Compose([
     T.Resize(256),
-    T.RandomCrop(227),
+    T.RandomCrop(224),
     T.RandomHorizontalFlip(),
 
     # === Pixel intensity augmentations on GPU ===
@@ -17,7 +17,7 @@ train_transform = T.Compose([
 
 val_transform = T.Compose([
     T.Resize(256),
-    T.CenterCrop(227),
+    T.CenterCrop(224),
     T.ToImage(),
     T.ToDtype(torch.float32, scale=True),
 ])
