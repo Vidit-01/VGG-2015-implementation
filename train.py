@@ -8,7 +8,17 @@ from tqdm import tqdm
 import time
 import kornia.augmentation as K
 
-from utils.dataset import trainset,testset
+# === your utils ===
+from utils.dataset import TinyImageNetTrain, TinyImageNetVal
+
+# ----------------------------------------
+# Load transforms dynamically
+# ----------------------------------------
+def load_transforms(path):
+    spec = importlib.util.spec_from_file_location("transform_module", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.train_transform, module.val_transform
 
 
 # ----------------------------------------
@@ -18,23 +28,27 @@ def load_model(model_path, num_classes):
     spec = importlib.util.spec_from_file_location("model_module", model_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.VGG(num_classes=num_classes)
+    return module.AlexNet(num_classes=num_classes)
 
 
 # ----------------------------------------
 # DataLoader builder
 # ----------------------------------------
-def get_dataloaders(batch_size, num_workers):
+def get_dataloaders(batch_size, num_workers, transforms_path):
+    train_transform, val_transform = load_transforms(transforms_path)
+
+    train_set = TinyImageNetTrain(transform=train_transform)
+    val_set   = TinyImageNetVal(transform=val_transform)
 
     train_loader = DataLoader(
-        trainset,
+        train_set,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
     )
 
     val_loader = DataLoader(
-        testset,
+        val_set,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -46,7 +60,7 @@ def get_dataloaders(batch_size, num_workers):
 # ----------------------------------------
 # Training for one epoch
 # ----------------------------------------
-def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs):
+def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, gpu_aug):
     model.train()
     total_loss = 0
     start_time = time.time()
@@ -60,11 +74,16 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
 
     for batch_idx, (x, y) in progress:
         x, y = x.to(device), y.to(device)
+
+        # GPU pixel augmentation
+        x = gpu_aug(x)
+
         optimizer.zero_grad()
         out = model(x)
         loss = criterion(out, y)
         loss.backward()
         optimizer.step()
+
         total_loss += loss.item()
 
         elapsed = time.time() - start_time
@@ -129,10 +148,11 @@ def main():
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--wd", type=float, default=0.0005)
-    parser.add_argument("--num_classes", type=int, default=10)
+    parser.add_argument("--num_classes", type=int, default=200)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="results/")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--transforms", default=os.path.join("utils", "transforms_baseline.py"))
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -145,12 +165,19 @@ def main():
 
     print(f"\n✅ Using device: {device}")
 
+    # Kornia GPU augmentations
+    gpu_aug = K.AugmentationSequential(
+        K.ColorJitter(0.2, 0.2, 0.2, 0.02),
+        K.RandomGrayscale(p=0.05),
+        data_keys=["input"],
+    ).to(device)
+
     # Model
     model = load_model(args.model_path, args.num_classes).to(device)
 
     # Dataloaders
     train_loader, val_loader = get_dataloaders(
-        args.bs, args.workers
+        args.bs, args.workers, args.transforms
     )
 
     criterion = nn.CrossEntropyLoss()
@@ -184,7 +211,7 @@ def main():
 
         train_loss = train_epoch(
             model, train_loader, optimizer, criterion,
-            device, epoch, args.epochs
+            device, epoch, args.epochs, gpu_aug
         )
 
         val_acc = evaluate(model, val_loader, device, epoch, args.epochs)
