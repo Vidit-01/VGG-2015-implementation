@@ -65,3 +65,8 @@ class VGG(nn.Module):
 
     
 
+import torch.nn as nn
+model = VGG()
+# Assuming 'model' is your PyTorch nn.Module instance
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total parameters: {total_params}")

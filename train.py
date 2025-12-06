@@ -3,17 +3,17 @@ import importlib.util
 import os
 import torch
 import torch.nn as nn
-import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import time
+import kornia.augmentation as K
 
+# === your utils ===
 from utils.dataset import TinyImageNetTrain, TinyImageNetVal
 
-
-# ------------------------------
-# Dynamic import helpers
-# ------------------------------
+# ----------------------------------------
+# Load transforms dynamically
+# ----------------------------------------
 def load_transforms(path):
     spec = importlib.util.spec_from_file_location("transform_module", path)
     module = importlib.util.module_from_spec(spec)
@@ -21,6 +21,9 @@ def load_transforms(path):
     return module.train_transform, module.val_transform
 
 
+# ----------------------------------------
+# Load model dynamically
+# ----------------------------------------
 def load_model(model_path, num_classes):
     spec = importlib.util.spec_from_file_location("model_module", model_path)
     module = importlib.util.module_from_spec(spec)
@@ -28,245 +31,222 @@ def load_model(model_path, num_classes):
     return module.VGG(num_classes=num_classes)
 
 
-# ------------------------------
-# Data Loaders
-# ------------------------------
-def get_dataloaders(batch_size, num_workers, transforms_path, distributed):
+# ----------------------------------------
+# DataLoader builder
+# ----------------------------------------
+def get_dataloaders(batch_size, num_workers, transforms_path):
     train_transform, val_transform = load_transforms(transforms_path)
 
     train_set = TinyImageNetTrain(transform=train_transform)
-    val_set = TinyImageNetVal(transform=val_transform)
-
-    train_sampler = DistributedSampler(train_set, shuffle=True) if distributed else None
+    val_set   = TinyImageNetVal(transform=val_transform)
 
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
+        shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 0 else None,
-        drop_last=True
     )
 
     val_loader = DataLoader(
         val_set,
-        batch_size=batch_size * 2,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 0 else None,
     )
 
-    return train_loader, val_loader, train_sampler
+    return train_loader, val_loader
 
 
-# ------------------------------
-# TRAIN ONE EPOCH
-# ------------------------------
-def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, scaler, rank=0, grad_clip=1.0):
+# ----------------------------------------
+# Training for one epoch
+# ----------------------------------------
+def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, gpu_aug):
     model.train()
-    total_loss, correct, total = 0, 0, 0
+    total_loss = 0
+    start_time = time.time()
 
-    # safe autocast for PyTorch 1.13
-    if device.type == "cuda":
-        autocast = torch.cuda.amp.autocast
-    else:
-        from contextlib import nullcontext
-        autocast = nullcontext
+    progress = tqdm(
+        enumerate(loader),
+        total=len(loader),
+        desc=f"Epoch {epoch}/{total_epochs} [train]",
+        leave=False
+    )
 
-    progress = tqdm(loader, desc=f"Train {epoch}/{total_epochs}", dynamic_ncols=True, leave=False) if rank == 0 else loader
+    for batch_idx, (x, y) in progress:
+        x, y = x.to(device), y.to(device)
 
-    for x, y in progress:
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
+        # GPU pixel augmentation
+        x = gpu_aug(x)
 
-        with autocast():
-            out = model(x)
-            loss = criterion(out, y)
-
-        if scaler:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
+        optimizer.zero_grad()
+        out = model(x)
+        loss = criterion(out, y)
+        loss.backward()
+        optimizer.step()
 
         total_loss += loss.item()
-        preds = out.argmax(1)
-        correct += (preds == y).sum().item()
-        total += y.size(0)
 
-        if rank == 0:
-            progress.set_postfix(loss=f"{loss.item():.4f}", acc=f"{correct/total:.4f}")
+        elapsed = time.time() - start_time
+        batches_done = batch_idx + 1
+        batches_total = len(loader)
+        eta = elapsed / batches_done * (batches_total - batches_done)
 
-    return total_loss / len(loader), correct / total
+        progress.set_postfix({
+            "batch": f"{batches_done}/{batches_total}",
+            "loss": f"{loss.item():.4f}",
+            "eta": f"{eta:.1f}s"
+        })
+
+    return total_loss / len(loader)
 
 
-# ------------------------------
-# VALIDATION
-# ------------------------------
-def evaluate(model, loader, device, rank=0):
-
+# ----------------------------------------
+# Validation
+# ----------------------------------------
+def evaluate(model, loader, device, epoch, total_epochs):
     model.eval()
-    total_loss, correct, total = 0, 0, 0
-    criterion = nn.CrossEntropyLoss()
+    correct, total = 0, 0
+    start_time = time.time()
 
-    if device.type == "cuda":
-        autocast = torch.cuda.amp.autocast
-    else:
-        from contextlib import nullcontext
-        autocast = nullcontext
-
-    progress = tqdm(loader, desc="Val", dynamic_ncols=True, leave=False) if rank == 0 else loader
+    progress = tqdm(
+        enumerate(loader),
+        total=len(loader),
+        desc=f"Epoch {epoch}/{total_epochs} [val]",
+        leave=False
+    )
 
     with torch.no_grad():
-        for x, y in progress:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        for batch_idx, (x, y) in progress:
+            x, y = x.to(device), y.to(device)
 
-            with autocast():
-                out = model(x)
-                loss = criterion(out, y)
-
-            total_loss += loss.item()
-            correct += (out.argmax(1) == y).sum().item()
+            preds = model(x).argmax(dim=1)
+            correct += (preds == y).sum().item()
             total += y.size(0)
 
-            if rank == 0:
-                progress.set_postfix(acc=f"{correct/total:.4f}")
+            elapsed = time.time() - start_time
+            batches_done = batch_idx + 1
+            batches_total = len(loader)
+            eta = elapsed / batches_done * (batches_total - batches_done)
 
-    return correct / total, total_loss / len(loader)
+            progress.set_postfix({
+                "batch": f"{batches_done}/{batches_total}",
+                "acc": f"{(correct/total):.4f}",
+                "eta": f"{eta:.1f}s"
+            })
+
+    return correct / total
 
 
-# ------------------------------
-# MAIN TRAINING LOOP
-# ------------------------------
+# ----------------------------------------
+# Main
+# ----------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model_path")
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--bs", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--wd", type=float, default=0.0001)
+    parser.add_argument("--bs", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--wd", type=float, default=0.0005)
     parser.add_argument("--num_classes", type=int, default=200)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="results/")
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--transforms", default=os.path.join("utils", "transforms_baseline.py"))
-    parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--warmup_epochs", type=int, default=5)
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
 
-    # Device / DDP
-    distributed = "RANK" in os.environ
-    rank = 0
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Auto device
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
 
-    if distributed:
-        dist.init_process_group("nccl")
-        rank = dist.get_rank()
-        local_rank = int(os.environ["LOCAL_RANK"])
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(local_rank)
+    print(f"\n✅ Using device: {device}")
 
-    if rank == 0:
-        print(f"[Device] {device}")
+    # Kornia GPU augmentations
+    gpu_aug = K.AugmentationSequential(
+        K.ColorJitter(0.2, 0.2, 0.2, 0.02),
+        K.RandomGrayscale(p=0.05),
+        data_keys=["input"],
+    ).to(device)
 
-    # Load model
-    model = load_model(args.model_path, args.num_classes)
+    # Model
+    model = load_model(args.model_path, args.num_classes).to(device)
 
-    # ⚠️ IMPORTANT FIX:
-    # DataParallel FIRST, then torch.compile
-    if not distributed and torch.cuda.device_count() > 1:
-        if rank == 0:
-            print(f"🔀 Using DataParallel ({torch.cuda.device_count()} GPUs)")
-        model = nn.DataParallel(model)
-
-    if hasattr(torch, "compile"):
-        if rank == 0:
-            print("🚀 Compiling model...")
-        model = torch.compile(model)
-
-    model = model.to(device)
-
-    # Load data
-    train_loader, val_loader, train_sampler = get_dataloaders(
-        args.bs, args.workers, args.transforms, distributed
+    # Dataloaders
+    train_loader, val_loader = get_dataloaders(
+        args.bs, args.workers, args.transforms
     )
 
-    # Optimizer, Loss, Scheduler
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-
-    optimizer = torch.optim.AdamW(
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(
         model.parameters(),
         lr=args.lr,
+        momentum=args.momentum,
         weight_decay=args.wd
     )
 
-    warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=args.warmup_epochs)
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=1e-6
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, [warmup, cosine], milestones=[args.warmup_epochs]
+    # Plateau LR scheduler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=0.5,
+        patience=3,
+        threshold=1e-4,
+        min_lr=1e-6,
+        # verbose=True
     )
 
-    scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
-
-    # Training
+    # Early stopping
+    es_patience = 3     # number of LR drops allowed
+    es_counter = 0
     best_acc = 0
-    best_epoch = 0
-    start = time.time()
 
+    # Training loop
     for epoch in range(1, args.epochs + 1):
+        print(f"\n===== Epoch {epoch}/{args.epochs} =====")
+        print(f"Current LR: {optimizer.param_groups[0]['lr']:.6f}")
 
-        if distributed:
-            train_sampler.set_epoch(epoch)
-
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, criterion, device,
-            epoch, args.epochs, scaler, rank, args.grad_clip
+        train_loss = train_epoch(
+            model, train_loader, optimizer, criterion,
+            device, epoch, args.epochs, gpu_aug
         )
 
-        val_acc, val_loss = evaluate(model, val_loader, device, rank)
+        val_acc = evaluate(model, val_loader, device, epoch, args.epochs)
 
-        scheduler.step()
+        print(f"✅ Epoch {epoch} done | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f}")
 
-        if rank == 0:
-            print(f"\nEpoch {epoch}:")
-            print(f"  Train Loss {train_loss:.4f} | Train Acc {train_acc:.4f}")
-            print(f"  Val   Loss {val_loss:.4f} | Val   Acc {val_acc:.4f}")
-            print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}")
+        # Save best
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save({
+                "state_dict": model.state_dict(),
+                "num_classes": args.num_classes
+            }, os.path.join(args.out, "best.pth"))
+            print("💾 Saved new best model!")
+            improved = True
+        else:
+            improved = False
 
-            if val_acc > best_acc:
-                best_acc = val_acc
-                best_epoch = epoch
+        # Scheduler step
+        old_lr = optimizer.param_groups[0]["lr"]
+        scheduler.step(val_acc)
+        new_lr = optimizer.param_groups[0]["lr"]
 
-                ckpt = {
-                    "epoch": epoch,
-                    "state_dict": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "best_acc": best_acc,
-                    "args": vars(args)
-                }
+        if new_lr < old_lr:
+            es_counter += 1
+            print(f"📉 LR reduced: {old_lr} → {new_lr} (plateau count = {es_counter})")
+        else:
+            es_counter = max(es_counter - 1, 0)
 
-                torch.save(ckpt, os.path.join(args.out, "best.pth"))
-                print(f"💾 Saved best model (acc={best_acc:.4f})")
+        # Early stopping
+        if es_counter >= es_patience:
+            print(f"\n🛑 Early stopping triggered at epoch {epoch}!")
+            break
 
-    if rank == 0:
-        print(f"\n🎉 Finished! Best acc = {best_acc:.4f} at epoch {best_epoch}")
-        print(f"Total time = { (time.time() - start)/60:.2f} min\n")
-
-    if distributed:
-        dist.destroy_process_group()
+    print(f"\n🎉 Training complete! Best Val Acc: {best_acc:.4f}")
 
 
 if __name__ == "__main__":
