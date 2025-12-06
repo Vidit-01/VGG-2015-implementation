@@ -11,6 +11,9 @@ import kornia.augmentation as K
 # === your utils ===
 from utils.dataset import TinyImageNetTrain, TinyImageNetVal
 
+torch.backends.cudnn.benchmark = True   # 🔥 Major speed boost
+
+
 # ----------------------------------------
 # Load transforms dynamically
 # ----------------------------------------
@@ -32,7 +35,7 @@ def load_model(model_path, num_classes):
 
 
 # ----------------------------------------
-# DataLoader builder
+# DataLoader builder (OPTIMIZED)
 # ----------------------------------------
 def get_dataloaders(batch_size, num_workers, transforms_path):
     train_transform, val_transform = load_transforms(transforms_path)
@@ -45,6 +48,9 @@ def get_dataloaders(batch_size, num_workers, transforms_path):
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2
     )
 
     val_loader = DataLoader(
@@ -52,15 +58,18 @@ def get_dataloaders(batch_size, num_workers, transforms_path):
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2
     )
 
     return train_loader, val_loader
 
 
 # ----------------------------------------
-# Training for one epoch
+# Training for one epoch (AMP + optimizations)
 # ----------------------------------------
-def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, gpu_aug):
+def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, gpu_aug, scaler):
     model.train()
     total_loss = 0
     start_time = time.time()
@@ -73,35 +82,28 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
     )
 
     for batch_idx, (x, y) in progress:
-        x, y = x.to(device), y.to(device)
-
-        # GPU pixel augmentation
-        x = gpu_aug(x)
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        out = model(x)
-        loss = criterion(out, y)
-        loss.backward()
-        optimizer.step()
+
+        # AMP autocast for huge speed boost with VGG
+        with torch.cuda.amp.autocast():
+            x = gpu_aug(x)
+            out = model(x)
+            loss = criterion(out, y)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item()
-
-        elapsed = time.time() - start_time
-        batches_done = batch_idx + 1
-        batches_total = len(loader)
-        eta = elapsed / batches_done * (batches_total - batches_done)
-
-        progress.set_postfix({
-            "batch": f"{batches_done}/{batches_total}",
-            "loss": f"{loss.item():.4f}",
-            "eta": f"{eta:.1f}s"
-        })
 
     return total_loss / len(loader)
 
 
 # ----------------------------------------
-# Validation
+# Validation (no change)
 # ----------------------------------------
 def evaluate(model, loader, device, epoch, total_epochs):
     model.eval()
@@ -117,22 +119,12 @@ def evaluate(model, loader, device, epoch, total_epochs):
 
     with torch.no_grad():
         for batch_idx, (x, y) in progress:
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
             preds = model(x).argmax(dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
-
-            elapsed = time.time() - start_time
-            batches_done = batch_idx + 1
-            batches_total = len(loader)
-            eta = elapsed / batches_done * (batches_total - batches_done)
-
-            progress.set_postfix({
-                "batch": f"{batches_done}/{batches_total}",
-                "acc": f"{(correct/total):.4f}",
-                "eta": f"{eta:.1f}s"
-            })
 
     return correct / total
 
@@ -149,7 +141,7 @@ def main():
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--wd", type=float, default=0.0005)
     parser.add_argument("--num_classes", type=int, default=200)
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--out", default="results/")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--transforms", default=os.path.join("utils", "transforms_baseline.py"))
@@ -158,14 +150,10 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     # Auto device
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n✅ Using device: {device}")
 
-    # Kornia GPU augmentations
+    # GPU augmentations (inside autocast → faster)
     gpu_aug = K.AugmentationSequential(
         K.ColorJitter(0.2, 0.2, 0.2, 0.02),
         K.RandomGrayscale(p=0.05),
@@ -188,7 +176,6 @@ def main():
         weight_decay=args.wd
     )
 
-    # Plateau LR scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",
@@ -196,11 +183,12 @@ def main():
         patience=3,
         threshold=1e-4,
         min_lr=1e-6,
-        # verbose=True
     )
 
+    scaler = torch.cuda.amp.GradScaler()   # AMP scaler
+
     # Early stopping
-    es_patience = 3     # number of LR drops allowed
+    es_patience = 3
     es_counter = 0
     best_acc = 0
 
@@ -211,14 +199,14 @@ def main():
 
         train_loss = train_epoch(
             model, train_loader, optimizer, criterion,
-            device, epoch, args.epochs, gpu_aug
+            device, epoch, args.epochs, gpu_aug, scaler
         )
 
         val_acc = evaluate(model, val_loader, device, epoch, args.epochs)
 
         print(f"✅ Epoch {epoch} done | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f}")
 
-        # Save best
+        # Save best model
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save({
@@ -230,7 +218,7 @@ def main():
         else:
             improved = False
 
-        # Scheduler step
+        # LR scheduler
         old_lr = optimizer.param_groups[0]["lr"]
         scheduler.step(val_acc)
         new_lr = optimizer.param_groups[0]["lr"]
