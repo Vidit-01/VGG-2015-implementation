@@ -9,7 +9,7 @@ import time
 import kornia.augmentation as K
 
 # === your utils ===
-from utils.dataset import TinyImageNetTrain, TinyImageNetVal
+from utils.dataset import CIFAR10Train, CIFAR10Val
 
 # ----------------------------------------
 # Load transforms dynamically
@@ -28,7 +28,7 @@ def load_model(model_path, num_classes):
     spec = importlib.util.spec_from_file_location("model_module", model_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.AlexNet(num_classes=num_classes)
+    return module.VGG(num_classes=num_classes)
 
 
 # ----------------------------------------
@@ -37,8 +37,8 @@ def load_model(model_path, num_classes):
 def get_dataloaders(batch_size, num_workers, transforms_path):
     train_transform, val_transform = load_transforms(transforms_path)
 
-    train_set = TinyImageNetTrain(transform=train_transform)
-    val_set   = TinyImageNetVal(transform=val_transform)
+    train_set = CIFAR10Train(transform=train_transform)
+    val_set   = CIFAR10Val(transform=val_transform)
 
     train_loader = DataLoader(
         train_set,
