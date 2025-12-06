@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--wd", type=float, default=0.0005)
-    parser.add_argument("--num_classes", type=int, default=200)
+    parser.add_argument("--num_classes", type=int, default=10)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="results/")
     parser.add_argument("--device", default="auto")

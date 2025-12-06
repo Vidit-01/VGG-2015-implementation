@@ -4,13 +4,13 @@ from torchvision import transforms
 
 
 train_transform = transforms.Compose([
-    transforms.Resize(256),
+    transforms.Resize(68),
     transforms.CenterCrop(64),
     transforms.ToTensor(),
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize(256),
+    transforms.Resize(68),
     transforms.CenterCrop(64),
     transforms.ToTensor(),
 ])
