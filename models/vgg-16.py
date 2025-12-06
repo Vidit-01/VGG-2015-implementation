@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class VGG(nn.Module):
-    def __init__(self, num_classes=200):
+    def __init__(self, num_classes=10):
         super().__init__()
 
         def conv(in_c, out_c):
