@@ -65,23 +65,26 @@ def get_dataloaders(batch_size, num_workers, transforms_path, distributed):
 
 
 # ------------------------------
-# Training Step
+# TRAIN ONE EPOCH
 # ------------------------------
 def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, scaler, rank=0, grad_clip=1.0):
-
     model.train()
     total_loss, correct, total = 0, 0, 0
 
-    autocast = torch.cuda.amp.autocast if device.type == "cuda" else torch.autocast
+    # safe autocast for PyTorch 1.13
+    if device.type == "cuda":
+        autocast = torch.cuda.amp.autocast
+    else:
+        from contextlib import nullcontext
+        autocast = nullcontext
 
     progress = tqdm(loader, desc=f"Train {epoch}/{total_epochs}", dynamic_ncols=True, leave=False) if rank == 0 else loader
 
     for x, y in progress:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(device_type=device.type):
+        with autocast():
             out = model(x)
             loss = criterion(out, y)
 
@@ -108,14 +111,19 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
 
 
 # ------------------------------
-# Validation
+# VALIDATION
 # ------------------------------
 def evaluate(model, loader, device, rank=0):
 
     model.eval()
     total_loss, correct, total = 0, 0, 0
     criterion = nn.CrossEntropyLoss()
-    autocast = torch.cuda.amp.autocast if device.type == "cuda" else torch.autocast
+
+    if device.type == "cuda":
+        autocast = torch.cuda.amp.autocast
+    else:
+        from contextlib import nullcontext
+        autocast = nullcontext
 
     progress = tqdm(loader, desc="Val", dynamic_ncols=True, leave=False) if rank == 0 else loader
 
@@ -123,7 +131,7 @@ def evaluate(model, loader, device, rank=0):
         for x, y in progress:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
 
-            with autocast(device_type=device.type):
+            with autocast():
                 out = model(x)
                 loss = criterion(out, y)
 
@@ -157,9 +165,7 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
 
-    # ----------------------------------
-    # Device / Distributed Setup
-    # ----------------------------------
+    # Device / DDP
     distributed = "RANK" in os.environ
     rank = 0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -174,19 +180,16 @@ def main():
     if rank == 0:
         print(f"[Device] {device}")
 
-    # ----------------------------------
-    # Load Model
-    # ----------------------------------
+    # Load model
     model = load_model(args.model_path, args.num_classes)
 
-    # IMPORTANT FIX:
-    # DataParallel must come BEFORE torch.compile
+    # ⚠️ IMPORTANT FIX:
+    # DataParallel FIRST, then torch.compile
     if not distributed and torch.cuda.device_count() > 1:
         if rank == 0:
-            print(f"🔀 Using DataParallel({torch.cuda.device_count()} GPUs)")
+            print(f"🔀 Using DataParallel ({torch.cuda.device_count()} GPUs)")
         model = nn.DataParallel(model)
 
-    # compile AFTER DataParallel
     if hasattr(torch, "compile"):
         if rank == 0:
             print("🚀 Compiling model...")
@@ -194,16 +197,12 @@ def main():
 
     model = model.to(device)
 
-    # ----------------------------------
-    # Data
-    # ----------------------------------
+    # Load data
     train_loader, val_loader, train_sampler = get_dataloaders(
         args.bs, args.workers, args.transforms, distributed
     )
 
-    # ----------------------------------
-    # Loss, Optimizer, Scheduler
-    # ----------------------------------
+    # Optimizer, Loss, Scheduler
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     optimizer = torch.optim.AdamW(
@@ -213,14 +212,16 @@ def main():
     )
 
     warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=args.warmup_epochs)
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=1e-6)
-    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [warmup, cosine], milestones=[args.warmup_epochs])
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=1e-6
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, [warmup, cosine], milestones=[args.warmup_epochs]
+    )
 
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
-    # ----------------------------------
-    # Training Loop
-    # ----------------------------------
+    # Training
     best_acc = 0
     best_epoch = 0
     start = time.time()
