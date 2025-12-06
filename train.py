@@ -5,8 +5,9 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
-from tqdm import tqdm
+from tqdm.notebook import tqdm   # <-- cleaner in Kaggle
 import time
+
 
 from utils.dataset import TinyImageNetTrain, TinyImageNetVal
 
@@ -47,9 +48,10 @@ def get_dataloaders(batch_size, num_workers, transforms_path, distributed):
         train_set,
         batch_size=batch_size,
         shuffle=(train_sampler is None),
-        num_workers=num_workers,
         sampler=train_sampler,
+        num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True
     )
 
     val_loader = DataLoader(
@@ -58,6 +60,7 @@ def get_dataloaders(batch_size, num_workers, transforms_path, distributed):
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True
     )
 
     return train_loader, val_loader, train_sampler
@@ -69,11 +72,12 @@ def get_dataloaders(batch_size, num_workers, transforms_path, distributed):
 def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, scaler):
     model.train()
     total_loss = 0
-    start_time = time.time()
 
     progress = tqdm(
-        enumerate(loader), total=len(loader),
-        desc=f"Epoch {epoch}/{total_epochs} [train]",
+        enumerate(loader),
+        total=len(loader),
+        desc=f"🟦 Epoch {epoch}/{total_epochs} | Train",
+        dynamic_ncols=True,
         leave=False
     )
 
@@ -82,8 +86,8 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
 
         optimizer.zero_grad()
 
-        # AMP
-        with torch.cuda.amp.autocast(enabled=True):
+        # modern AMP
+        with torch.amp.autocast("cuda"):
             out = model(x)
             loss = criterion(out, y)
 
@@ -92,6 +96,8 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
         scaler.update()
 
         total_loss += loss.item()
+
+        progress.set_postfix_str(f"loss={loss.item():.4f}")
 
     return total_loss / len(loader)
 
@@ -106,7 +112,8 @@ def evaluate(model, loader, device, epoch, total_epochs):
     progress = tqdm(
         enumerate(loader),
         total=len(loader),
-        desc=f"Epoch {epoch}/{total_epochs} [val]",
+        desc=f"🟩 Epoch {epoch}/{total_epochs} | Val",
+        dynamic_ncols=True,
         leave=False
     )
 
@@ -114,9 +121,13 @@ def evaluate(model, loader, device, epoch, total_epochs):
         for batch_idx, (x, y) in progress:
             x, y = x.to(device), y.to(device)
 
-            preds = model(x).argmax(dim=1)
+            out = model(x)
+            preds = out.argmax(dim=1)
+
             correct += (preds == y).sum().item()
             total += y.size(0)
+
+            progress.set_postfix_str(f"acc={correct/total:.4f}")
 
     return correct / total
 
@@ -129,13 +140,11 @@ def main():
     parser.add_argument("model_path")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--bs", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--lr", type=float, default=0.0005)   # <-- Adam prefers smaller LR
     parser.add_argument("--wd", type=float, default=0.0005)
     parser.add_argument("--num_classes", type=int, default=200)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--out", default="results/")
-    parser.add_argument("--device", default="auto")
     parser.add_argument("--transforms", default=os.path.join("utils", "transforms_baseline.py"))
     args = parser.parse_args()
 
@@ -169,7 +178,7 @@ def main():
     # Wrap model in DDP
     if distributed:
         model = nn.parallel.DistributedDataParallel(
-            model, device_ids=[local_rank], output_device=local_rank
+            model, device_ids=[local_rank]
         )
 
     # --------------------
@@ -180,17 +189,20 @@ def main():
     )
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(
+
+    # Adam works better with small LR
+    optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr,
-        momentum=args.momentum, weight_decay=args.wd
+        weight_decay=args.wd
     )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=3,
+        optimizer, mode="max",
+        factor=0.5, patience=3,
         threshold=1e-4, min_lr=1e-6
     )
 
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
 
     best_acc = 0
     es_counter = 0
@@ -212,7 +224,7 @@ def main():
         val_acc = evaluate(model, val_loader, device, epoch, args.epochs)
 
         if not distributed or dist.get_rank() == 0:
-            print(f"\nEpoch {epoch}: loss={train_loss:.4f} acc={val_acc:.4f}")
+            print(f"\nEpoch {epoch}: loss={train_loss:.4f} | val_acc={val_acc:.4f}")
 
             if val_acc > best_acc:
                 best_acc = val_acc
@@ -222,6 +234,7 @@ def main():
                 )
                 print("💾 Best model saved!")
 
+            # LR schedule
             old_lr = optimizer.param_groups[0]["lr"]
             scheduler.step(val_acc)
             new_lr = optimizer.param_groups[0]["lr"]
