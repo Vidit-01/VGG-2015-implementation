@@ -60,7 +60,7 @@ def get_dataloaders(batch_size, num_workers, transforms_path):
 # ----------------------------------------
 # Training for one epoch
 # ----------------------------------------
-def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs, gpu_aug):
+def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs):
     model.train()
     total_loss = 0
     start_time = time.time()
@@ -75,8 +75,6 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
     for batch_idx, (x, y) in progress:
         x, y = x.to(device), y.to(device)
 
-        # GPU pixel augmentation
-        x = gpu_aug(x)
 
         optimizer.zero_grad()
         out = model(x)
@@ -166,15 +164,9 @@ def main():
 
     print(f"\n✅ Using device: {device}")
 
-    # Kornia GPU augmentations
-    gpu_aug = K.AugmentationSequential(
-        K.ColorJitter(0.2, 0.2, 0.2, 0.02),
-        K.RandomGrayscale(p=0.05),
-        data_keys=["input"],
-    ).to(device)
-
     # Model
     model = load_model(args.model_path, args.num_classes).to(device)
+    print(model.classifier[-1])
 
     # Dataloaders
     train_loader, val_loader = get_dataloaders(
@@ -212,7 +204,7 @@ def main():
 
         train_loss = train_epoch(
             model, train_loader, optimizer, criterion,
-            device, epoch, args.epochs, gpu_aug
+            device, epoch, args.epochs
         )
 
         val_acc = evaluate(model, val_loader, device, epoch, args.epochs)
