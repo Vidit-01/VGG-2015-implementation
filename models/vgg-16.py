@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+
+
 class VGG(nn.Module):
     def __init__(self, num_classes=200):
         super().__init__()
@@ -16,47 +18,50 @@ class VGG(nn.Module):
             # Block 1
             conv_bn(3, 64),
             conv_bn(64, 64),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(2, 2),
 
             # Block 2
             conv_bn(64, 128),
             conv_bn(128, 128),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(2, 2),
 
             # Block 3
             conv_bn(128, 256),
             conv_bn(256, 256),
             conv_bn(256, 256),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(2, 2),
 
-            # Block 4
-            conv_bn(256, 512),
-            conv_bn(512, 512),
-            conv_bn(512, 512),
-            nn.MaxPool2d(2),
+            # Block 4 - Reduced to 384 instead of 512
+            conv_bn(256, 384),
+            conv_bn(384, 384),
+            conv_bn(384, 384),
+            nn.MaxPool2d(2, 2),
 
-            # Block 5
-            conv_bn(512, 512),
-            conv_bn(512, 512),
-            conv_bn(512, 512),
-            nn.MaxPool2d(2),
+            # Block 5 - Reduced to 384 instead of 512
+            conv_bn(384, 384),
+            conv_bn(384, 384),
+            conv_bn(384, 384),
+            nn.MaxPool2d(2, 2),
         )
 
-        # For TinyImageNet (64x64): after 5 pools -> 2x2
+        self.avgpool = nn.AdaptiveAvgPool2d((2, 2))
+
+        # Much smaller classifier
         self.classifier = nn.Sequential(
-            nn.Linear(512 * 2 * 2, 4096),
-            nn.ReLU(True),
-            nn.Dropout(),
-
-            nn.Linear(4096, 4096),
-            nn.ReLU(True),
-            nn.Dropout(),
-
-            nn.Linear(4096, num_classes)
+            nn.Dropout(0.5),
+            nn.Linear(384 * 2 * 2, 1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(1024, num_classes)
         )
+
 
     def forward(self, x):
         x = self.features(x)
+        x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.classifier(x)
         return x
+
+    
+
