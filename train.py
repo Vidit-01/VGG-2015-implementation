@@ -24,7 +24,7 @@ def load_model(model_path, num_classes):
 # ----------------------------------------
 # DataLoader builder
 # ----------------------------------------
-def get_dataloaders(batch_size, num_workers, transforms_path):
+def get_dataloaders(batch_size, num_workers):
 
     train_loader = DataLoader(
         trainset,
@@ -150,7 +150,7 @@ def main():
 
     # Dataloaders
     train_loader, val_loader = get_dataloaders(
-        args.bs, args.workers, args.transforms
+        args.bs, args.workers
     )
 
     criterion = nn.CrossEntropyLoss()
