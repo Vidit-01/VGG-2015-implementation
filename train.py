@@ -80,7 +80,7 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch, total_epochs
 
         optimizer.zero_grad()
         out = model(x)
-        print(out.shape,y.shape)
+        # print(out.shape,y.shape)
         loss = criterion(out, y)
         loss.backward()
         optimizer.step()
