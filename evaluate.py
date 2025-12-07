@@ -6,9 +6,6 @@ import argparse
 import time
 from tqdm import tqdm
 
-# -----------------------------
-#  Load model architecture
-# -----------------------------
 def load_model(model_path, num_classes=10):
     import importlib.util
     spec = importlib.util.spec_from_file_location("model_module", model_path)
@@ -16,10 +13,6 @@ def load_model(model_path, num_classes=10):
     spec.loader.exec_module(module)
     return module.VGG(num_classes=num_classes)
 
-
-# -----------------------------
-#  Evaluation function
-# -----------------------------
 def evaluate(model, loader, device):
     model.eval()
     correct, total = 0, 0
@@ -45,26 +38,16 @@ def evaluate(model, loader, device):
             })
     return correct / total
 
-
-# -----------------------------
-#  Main
-# -----------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model_path", help="Path to model .py file")
     parser.add_argument("checkpoint", help="Path to saved .pth file")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
-    # --- load model ---
     model = load_model(args.model_path).to(device)
-
-    # --- load checkpoint ---
     ckpt = torch.load(args.checkpoint, map_location=device)
-    # print(ckpt)
-    # model.load_state_dict(ckpt["state_dict"])
+    model.load_state_dict(ckpt, strict=False)
     print("Loaded checkpoint!")
-
-    # --- CIFAR-10 val loader ---
     transform = transforms.Compose([
         transforms.Resize(224),
         transforms.ToTensor(),
@@ -80,7 +63,6 @@ def main():
     val_loader = DataLoader(val_set, batch_size=64,
                             shuffle=False, num_workers=2)
 
-    # --- evaluate ---
     acc = evaluate(model, val_loader, device)
     print(f"\nAccuracy: {acc*100:.2f}%")
 
