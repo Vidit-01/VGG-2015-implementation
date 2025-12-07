@@ -1,82 +1,89 @@
-import argparse
-import importlib.util
 import torch
+import torch.nn as nn
+from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
+import argparse
+import time
+from tqdm import tqdm
 
-from utils.dataset import TinyImageNetVal
-from utils.transforms import val_transform
-
-
-def load_model(model_path, num_classes):
+# -----------------------------
+#  Load model architecture
+# -----------------------------
+def load_model(model_path, num_classes=10):
+    import importlib.util
     spec = importlib.util.spec_from_file_location("model_module", model_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.VGG(num_classes=num_classes)
 
 
+# -----------------------------
+#  Evaluation function
+# -----------------------------
 def evaluate(model, loader, device):
     model.eval()
-    top1_correct, top5_correct, total = 0, 0, 0
+    correct, total = 0, 0
 
     with torch.no_grad():
-        for x, y in loader:
+        start_time = time.time()
+        progress = tqdm(enumerate(loader))
+        for batch_idx,(x, y) in progress:
             x, y = x.to(device), y.to(device)
-
-            logits = model(x)  # [batch, num_classes]
-
-            # ---- TOP-1 ----
-            top1_preds = logits.argmax(dim=1)
-            top1_correct += (top1_preds == y).sum().item()
-
-            # ---- TOP-5 ----
-            top5_preds = torch.topk(logits, k=5, dim=1).indices  # [batch, 5]
-            top5_correct += top5_preds.eq(y.unsqueeze(1)).any(dim=1).sum().item()
-
+            logits = model(x)
+            preds = logits.argmax(dim=1)
+            correct += (preds == y).sum().item()
             total += y.size(0)
 
-    top1_acc = top1_correct / total
-    top5_acc = top5_correct / total
-    return top1_acc, top5_acc
+            elapsed = time.time() - start_time
+            batches_done = batch_idx + 1
+            batches_total = len(loader)
+            eta = elapsed / batches_done * (batches_total - batches_done)
+
+            progress.set_postfix({
+                "batch": f"{batches_done}/{batches_total}",
+                "eta": f"{eta:.1f}s"
+            })
+    return correct / total
 
 
-
+# -----------------------------
+#  Main
+# -----------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model_path", help="Path to model .py file")
     parser.add_argument("checkpoint", help="Path to saved .pth file")
-    parser.add_argument("--bs", type=int, default=64)
-    parser.add_argument("--num_classes", type=int, default=200)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--device", default="auto")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    # --- load model ---
+    model = load_model(args.model_path).to(device)
 
-    # auto device fallback
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
-
-    print(f"\nUsing device: {device}")
-
-    # load model architecture
-    model = load_model(args.model_path, args.num_classes).to(device)
-
-    # load checkpoint
+    # --- load checkpoint ---
     ckpt = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(ckpt["state_dict"])
-    print(f"Loaded checkpoint from: {args.checkpoint}")
+    # print(ckpt)
+    # model.load_state_dict(ckpt["state_dict"])
+    print("Loaded checkpoint!")
 
-    # build validation dataloader
-    val_set = TinyImageNetVal(transform=val_transform)
-    val_loader = DataLoader(val_set,
-                            batch_size=args.bs,
-                            shuffle=False,
-                            num_workers=args.workers)
+    # --- CIFAR-10 val loader ---
+    transform = transforms.Compose([
+        transforms.Resize(224),
+        transforms.ToTensor(),
+        
+        transforms.Normalize((0.4914, 0.4822, 0.4465),
+                (0.2023, 0.1994, 0.2010))
 
-    # evaluate
-    acc1,acc5 = evaluate(model, val_loader, device)
+    ])
 
-    print(f"\nValidation Accuracy \nTOP-1: {acc1 * 100:.2f}%\nTOP-5: {acc5*100:.2f}")
+    val_set = datasets.CIFAR10(root="data/cifar10", train=False,
+                               transform=transform, download=True)
+
+    val_loader = DataLoader(val_set, batch_size=64,
+                            shuffle=False, num_workers=2)
+
+    # --- evaluate ---
+    acc = evaluate(model, val_loader, device)
+    print(f"\nAccuracy: {acc*100:.2f}%")
+
 
 
 if __name__ == "__main__":
