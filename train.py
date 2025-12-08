@@ -107,7 +107,11 @@ def main():
     for epoch in range(11,20):
         train_loss, train_acc = train_epoch(model,optimizer,criterion,train_loader,device)
         val_acc = evaluate(model,val_loader,device)
+<<<<<<< HEAD
         print(f"Epoch {epoch+1}: Loss={train_loss:.3f} | Train Acc={train_acc:.3f} | Test Acc={val_acc:.3f}")
+=======
+        print(f"Epoch {epoch+1}: Loss={train_loss:.3f} | Train Acc={train_acc:.3f} | Test Acc={test_acc:.3f}")
+>>>>>>> 10052d895ca3f04c683efb6741563810c58b89ff
 
         if val_acc > best_acc:
             best_acc = val_acc
