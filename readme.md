@@ -116,6 +116,5 @@ Afterward, I implemented **VGG-11, VGG-13, VGG-16, and VGG-19** to verify basic 
 ## Citation
 Simonyan, K., & Zisserman, A. (2015).
 **Very Deep Convolutional Networks for Large-Scale Image Recognition.**
-arXiv:1409.1556.
 [Paper](https://arxiv.org/abs/1409.1556)
 
